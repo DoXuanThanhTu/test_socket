@@ -1,3 +1,4 @@
+// ================== MODULES ==================
 import express from "express";
 import WebSocket from "ws";
 
@@ -9,6 +10,7 @@ const WS_URL = `wss://smart-garden-websocket.onrender.com/?deviceId=${DEVICE_ID}
 process.on("uncaughtException", err =>
   console.error("[GLOBAL] Uncaught:", err)
 );
+
 process.on("unhandledRejection", err =>
   console.error("[GLOBAL] Unhandled:", err)
 );
@@ -28,15 +30,14 @@ express()
 let ws;
 let reconnectTimer = null;
 let heartbeatTimer = null;
+let watchdogTimer = null;
 
-// ---------- HEARTBEAT ----------
+// ---------- HEARTBEAT (PING) ----------
 function startHeartbeat() {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
 
   heartbeatTimer = setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.ping(); // gửi ping
-    }
+    if (ws && ws.readyState === WebSocket.OPEN) ws.ping();
   }, 15000);
 }
 
@@ -44,34 +45,50 @@ function startHeartbeat() {
 function connectWS() {
   ws = new WebSocket(WS_URL, { rejectUnauthorized: false });
 
+  let lastPong = Date.now();
+
   ws.on("open", () => {
     log(`[FAKE] Connected as ${DEVICE_ID}`);
+
     if (reconnectTimer) clearTimeout(reconnectTimer);
+
     startHeartbeat();
+
+    // Reset watchdog
+    if (watchdogTimer) clearInterval(watchdogTimer);
+    watchdogTimer = setInterval(() => {
+      if (Date.now() - lastPong > 30000) {
+        log("[FAKE] No pong for 30s → forcing reconnect...");
+        try { ws.terminate(); } catch {}
+      }
+    }, 5000);
   });
 
+  // ----- PONG -----
+  ws.on("pong", () => {
+    lastPong = Date.now();
+  });
+
+  // ----- Server ping -----
+  ws.on("ping", () => ws.pong());
+
+  // ----- MESSAGE -----
   ws.on("message", raw => {
     try {
       const text = raw.toString();
       const json = JSON.parse(text);
       log("[FAKE] Received:", json);
-    } catch {
-      log("[FAKE] Received NON-JSON:", raw);
+    } catch (err) {
+      log("[FAKE] Received NON-JSON:", raw.toString());
     }
   });
 
-  ws.on("ping", () => {
-    ws.pong(); // trả lời ping
-  });
-
-  ws.on("pong", () => {
-    // server phản hồi heartbeat → vẫn OK
-  });
-
+  // ----- ERROR -----
   ws.on("error", err => {
     log("[FAKE] WS Error:", err.message);
   });
 
+  // ----- CLOSED -----
   ws.on("close", (code, reason) => {
     log("[FAKE] WS Closed:", code, reason?.toString());
     safeReconnect();
@@ -88,7 +105,7 @@ function safeReconnect() {
   }, 3000);
 }
 
-// Start first connection
+// Start the first connection
 connectWS();
 
 // ================== RANDOM HELPER ==================
@@ -115,7 +132,7 @@ setInterval(() => {
   }
 }, 5000);
 
-// ================== SELF PING (HTTP) ==================
+// ================== OPTIONAL SELF-PING ==================
 function rand(msMin = 10, msMax = 20) {
   return (Math.random() * (msMax - msMin) + msMin) * 1000;
 }
